@@ -1,0 +1,111 @@
+---
+name: Build test binaries (exclusive watchdog)
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - exclusive-watchdog-test
+  workflow_dispatch:
+
+jobs:
+  build-binaries:
+    name: Build sunshine + display helper only
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Dependencies Windows
+        uses: msys2/setup-msys2@4f806de0a5a7294ffabaff804b38a9b435a73bda # v2.30.0
+        with:
+          msystem: ucrt64
+          update: true
+          cache: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-libjpeg-turbo
+            mingw-w64-ucrt-x86_64-libpng
+            mingw-w64-ucrt-x86_64-libwebp
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-tools
+
+      - name: Setup NodeJS
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: '20'
+
+      - name: Resolve managed tool paths
+        shell: pwsh
+        run: |
+          $nodeBinaryPath = (Get-Command node).Source
+          $nodePath = Split-Path -Path $nodeBinaryPath -Parent
+          "NODEJS_PATH=$nodePath" >> $env:GITHUB_ENV
+
+      - name: Build sunshine and display helper
+        shell: msys2 {0}
+        env:
+          BUILD_VERSION: 2.0.2-watchdog.test
+        run: |
+          set -euo pipefail
+          NODEJS_PATH=$(cygpath -u "$NODEJS_PATH")
+          export PATH="${NODEJS_PATH}:$PATH"
+          NPM_PATH="$(cygpath -m "${NODEJS_PATH}/npm.cmd")"
+          echo "Using node: $(command -v node) ($(node --version))"
+          echo "Using npm: $(command -v npm)"
+
+          mkdir -p build
+          cmake \
+            -B build \
+            -G Ninja \
+            -S . \
+            -DBUILD_WERROR=ON \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_SUNSHINE_VIRTUAL_DISPLAY_DRIVER=OFF \
+            -DBUILD_VIRTUALDISPLAY_PROBE=OFF \
+            -DBUILD_VIRTUALDISPLAY_TOOLS=OFF \
+            -DBUILD_VIRTUALDISPLAY_VULKAN_LAYER=OFF \
+            -DBUILD_DOCS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -g -gdwarf-4" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -g -gdwarf-4" \
+            -DSUNSHINE_ENABLE_WEBRTC=OFF \
+            -DSUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER=OFF \
+            -DSUNSHINE_NPM_EXECUTABLE="${NPM_PATH}" \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DSUNSHINE_PUBLISHER_NAME="watchdog-test" \
+            -DSUNSHINE_PUBLISHER_WEBSITE="https://github.com/Nonary/Vibepollo" \
+            -DSUNSHINE_PUBLISHER_ISSUE_URL="https://github.com/Nonary/Vibepollo/issues"
+          cmake --build build --target sunshine sunshine_display_helper --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
+
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'test-binaries'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          Copy-Item .\build\sunshine.exe $out\
+          Copy-Item .\build\sunshine_display_helper.exe $out\
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vibepollo-exclusive-watchdog-binaries
+          path: ${{ runner.temp }}\test-binaries\
+          retention-days: 14

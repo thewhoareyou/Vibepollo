@@ -2045,6 +2045,92 @@ namespace {
     g_watchdog_teardown_completed = true;
   }
 
+  // Exclusive layout watchdog: Windows can silently re-enable physical
+  // displays seconds after the helper deactivates them (monitor link retrain
+  // and power-state re-enumeration). While an exclusive session is live, poll
+  // the active topology and re-send the original APPLY payload when any
+  // display outside the requested topology becomes active.
+  std::atomic<std::uint64_t> &exclusive_watchdog_epoch() {
+    static std::atomic<std::uint64_t> epoch {0};
+    return epoch;
+  }
+
+  void disarm_exclusive_topology_watchdog() {
+    exclusive_watchdog_epoch().fetch_add(1, std::memory_order_acq_rel);
+  }
+
+  void arm_exclusive_topology_watchdog(
+    const display_helper_integration::DisplayApplyRequest &request,
+    const std::string &apply_payload
+  ) {
+    using display_helper_integration::VirtualDisplayArrangement;
+    if (!request.virtual_display_arrangement ||
+        *request.virtual_display_arrangement != VirtualDisplayArrangement::Exclusive ||
+        apply_payload.empty()) {
+      return;
+    }
+    std::vector<std::string> allowed;
+    for (const auto &group : request.topology.topology) {
+      allowed.insert(allowed.end(), group.begin(), group.end());
+    }
+    if (allowed.empty() && request.configuration && !request.configuration->m_device_id.empty()) {
+      allowed.push_back(request.configuration->m_device_id);
+    }
+    if (allowed.empty()) {
+      return;
+    }
+    const auto epoch = exclusive_watchdog_epoch().fetch_add(1, std::memory_order_acq_rel) + 1;
+    const auto session_generation = active_session_generation().value_or(0);
+    BOOST_LOG(info) << "Display helper: arming exclusive topology watchdog (allowed devices="
+                    << allowed.size() << ", session_generation=" << session_generation << ").";
+    std::thread([apply_payload, allowed = std::move(allowed), epoch, session_generation]() {
+      const auto superseded = [epoch]() {
+        return exclusive_watchdog_epoch().load(std::memory_order_acquire) != epoch;
+      };
+      std::this_thread::sleep_for(std::chrono::seconds(4));
+      int resends = 0;
+      while (!superseded()) {
+        if (session_generation == 0 || active_session_generation().value_or(0) != session_generation) {
+          return;
+        }
+        bool drift = false;
+        if (const auto active = display_helper_integration::capture_current_topology()) {
+          for (const auto &group : *active) {
+            for (const auto &device_id : group) {
+              const auto it = std::find_if(allowed.begin(), allowed.end(), [&](const std::string &id) {
+                return boost::iequals(id, device_id);
+              });
+              if (it == allowed.end()) {
+                drift = true;
+                BOOST_LOG(warning) << "Display helper: exclusive layout drift detected; unexpected active device "
+                                   << device_id << "; re-sending APPLY.";
+                break;
+              }
+            }
+            if (drift) {
+              break;
+            }
+          }
+        }
+        if (!drift) {
+          std::this_thread::sleep_for(std::chrono::seconds(2));
+          continue;
+        }
+        if (resends >= 20) {
+          BOOST_LOG(warning) << "Display helper: exclusive topology watchdog giving up after "
+                             << resends << " re-apply attempts.";
+          return;
+        }
+        const bool ok = platf::display_helper_client::send_apply_json(
+          apply_payload, nullptr, nullptr, nullptr, superseded, 15000, false);
+        ++resends;
+        BOOST_LOG(info) << "Display helper: exclusive watchdog re-apply #" << resends
+                        << " result=" << (ok ? "true" : "false");
+        std::this_thread::sleep_for(std::chrono::seconds(8));
+      }
+    }).detach();
+  }
+
   std::optional<std::string> build_helper_apply_payload(
     const display_helper_integration::DisplayApplyRequest &request,
     display_helper_integration::ApplyRetryPolicy retry_policy) {
@@ -2231,6 +2317,7 @@ namespace display_helper_integration {
       ApplyRetryPolicy retry_policy = ApplyRetryPolicy::Full,
       std::chrono::steady_clock::time_point startup_deadline = {},
       bool shutdown_class_caller = false) {
+      disarm_exclusive_topology_watchdog();
       const auto verification_timeout =
         retry_policy == ApplyRetryPolicy::StreamStart ?
           kStreamStartApplyVerificationTimeout :
@@ -2428,6 +2515,7 @@ namespace display_helper_integration {
           if (request.enable_virtual_display_watchdog) {
             platf::display_helper::Coordinator::instance().set_virtual_display_watchdog_enabled(true);
           }
+          arm_exclusive_topology_watchdog(request, *payload);
         }
         if (!ok && startup_cancellation_predicate()) {
           return false;
@@ -2638,6 +2726,7 @@ namespace display_helper_integration {
     // same lock can leave. Do not join here: recovery also owns driver locks.
     // Any already-dispatched APPLY/DISARM finishes before our REVERT; a stopped
     // worker cannot acquire the gate afterward and supersede this restore.
+    disarm_exclusive_topology_watchdog();
     VDISPLAY::cancel_all_virtual_display_recovery_monitors();
     BOOST_LOG(debug) << "Display helper: recovery monitors cancelled for accepted REVERT.";
     std::unique_lock<std::mutex> execution_lock(pending_apply_execution_mutex());
