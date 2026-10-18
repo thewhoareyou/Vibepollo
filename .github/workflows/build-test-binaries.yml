@@ -77,10 +77,6 @@ jobs:
             -S . \
             -DBUILD_WERROR=ON \
             -DBUILD_TESTS=OFF \
-            -DBUILD_SUNSHINE_VIRTUAL_DISPLAY_DRIVER=OFF \
-            -DBUILD_VIRTUALDISPLAY_PROBE=OFF \
-            -DBUILD_VIRTUALDISPLAY_TOOLS=OFF \
-            -DBUILD_VIRTUALDISPLAY_VULKAN_LAYER=OFF \
             -DBUILD_DOCS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -g -gdwarf-4" \
@@ -92,7 +88,7 @@ jobs:
             -DSUNSHINE_PUBLISHER_NAME="watchdog-test" \
             -DSUNSHINE_PUBLISHER_WEBSITE="https://github.com/Nonary/Vibepollo" \
             -DSUNSHINE_PUBLISHER_ISSUE_URL="https://github.com/Nonary/Vibepollo/issues"
-          cmake --build build --target sunshine sunshine_display_helper --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
+          cmake --build build --target sunshine sunshine_display_helper --parallel
 
       - name: Collect binaries
         shell: pwsh
