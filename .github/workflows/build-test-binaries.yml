@@ -96,7 +96,9 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP 'test-binaries'
           New-Item -ItemType Directory -Path $out -Force | Out-Null
           Copy-Item .\build\sunshine.exe $out\
-          Copy-Item .\build\sunshine_display_helper.exe $out\
+          $helper = Get-ChildItem -Recurse -Path .\build -Filter sunshine_display_helper.exe | Select-Object -First 1
+          if (-not $helper) { throw 'sunshine_display_helper.exe not found under build/' }
+          Copy-Item $helper.FullName $out\
           Get-ChildItem $out | Format-Table Name, Length
 
       - name: Upload test binaries
